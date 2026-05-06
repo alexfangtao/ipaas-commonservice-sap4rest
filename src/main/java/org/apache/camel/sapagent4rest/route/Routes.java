@@ -2,19 +2,17 @@ package org.apache.camel.sapagent4rest.route;
 
 import com.sap.conn.jco.ConversionException;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.camel.CamelContext;
-import org.apache.camel.sapagent4rest.config.ESBProperties;
+import org.apache.camel.sapagent4rest.config.CustomProperties;
 import org.apache.camel.Exchange;
 import org.apache.camel.builder.RouteBuilder;
-import org.apache.camel.model.rest.RestBindingMode;
 import org.apache.camel.sapagent4rest.exception.CallSAPException;
 import org.apache.camel.sapagent4rest.exception.RequestParamException;
 import org.apache.camel.sapagent4rest.service.*;
-import org.apache.camel.sapagent4rest.util.RsaUtil;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.util.Set;
 
 /**
  * Camel route definitions.
@@ -24,11 +22,13 @@ import java.util.Set;
 public class Routes extends RouteBuilder {
 
     @Autowired
-    ESBProperties prop;
+    CustomProperties prop;
+
+    @Value("${camel.custom.rest.token}")
+    private String restToken;
 
     @Override
     public void configure() throws Exception {
-        restConfiguration().bindingMode(RestBindingMode.json);
 
         //RESTful入口
         from(prop.getRestful()).to("direct:mainRoute");
@@ -36,20 +36,20 @@ public class Routes extends RouteBuilder {
         from("direct:mainRoute").id("mainRoute")
                 .doTry()
                     .bean(CacheService.class,"verifyConfig")
-                    .bean(VerifyHeader.class)
-                    .toD("ipaas-logger:RestRequest?code=code1&from=${exchangeProperty.X-FROM-SYS-ID}&to=${header.desName} Agent")
+                    .bean(VerifyHeader.class, "createRequest")
+                    .toD("ipaas-logger:RestRequest?code=code1&fromApp=${exchangeProperty.X-FROM-SYS-ID}&toApp=${header.desName} Agent")
                     .to("direct:callSap").id("callSap")
                 .doCatch(Exception.class)
                     .bean(GetErrorMsg.class, "getData")
-                    .toD("ipaas-logger:SAPException?code=code9&from=${header.desName} Agent&to=${exchangeProperty.X-FROM-SYS-ID}")
+                    .toD("ipaas-logger:SAPException?code=code9&fromApp=${header.desName} Agent&toApp=${exchangeProperty.X-FROM-SYS-ID}")
                     .log("### Process error:  ${body}")
                 .end()
-                .toD("ipaas-logger:RestResponse?code=code4&from=${header.desName} Agent&to=${exchangeProperty.X-FROM-SYS-ID}")
+                .toD("ipaas-logger:RestResponse?code=code4&fromApp=${header.desName} Agent&toApp=${exchangeProperty.X-FROM-SYS-ID}")
                 .end();
 
         from("direct:callSap")
-                .bean(SapRequest.class)
-                .toD("ipaas-logger:Request2SAP?code=code2&from=${header.desName} Agent&to=${exchangeProperty.X-TO-SYS-ID}")
+                .bean(SapRequest.class, "createRequest")
+                .toD("ipaas-logger:Request2SAP?code=code2&fromApp=${header.desName} Agent&toApp=${exchangeProperty.X-TO-SYS-ID}")
                 .doTry()
                 .toD("sap-srfc-destination:${exchangeProperty.DESTINATION}:${exchangeProperty.RFC}")
                 .doCatch(ConversionException.class)
@@ -63,8 +63,8 @@ public class Routes extends RouteBuilder {
                     throw new CallSAPException(exception.getMessage());
                 })
                 .end()
-                .toD("ipaas-logger:ResponseFromSAP?code=code3&from=${exchangeProperty.X-TO-SYS-ID}&to=${header.desName} Agent")
-                .bean(SapResponse.class)
+                .toD("ipaas-logger:ResponseFromSAP?code=code3&fromApp=${exchangeProperty.X-TO-SYS-ID}&toApp=${header.desName} Agent")
+                .bean(SapResponse.class, "createResponse")
                 .end();
 
         from("rest:post:operation/preview/{desName}/{function}")
@@ -74,26 +74,14 @@ public class Routes extends RouteBuilder {
                 .end();
 
         from(prop.getDelCache())
+                .process(p->{
+                    String token = p.getIn().getHeader("token", String.class);
+                    if (StringUtils.isEmpty(token) || !restToken.equals(token)) {
+                        throw new RequestParamException("请传入token");
+                    }
+                })
                 .bean(SapManage.class,"removePackage")
                 .end();
-
-        from("rest:get:queryQuitInterfaceEncryption").process(p->{
-            p.getIn().setBody(RsaUtil.getQuitInterfaceEncryption() == null ? "null" : RsaUtil.getQuitInterfaceEncryption().toString());
-        }).end();
-
-        from("rest:get:setQuitInterfaceEncryption").process(p->{
-            Boolean quitInterfaceEncryption = p.getIn().getHeader("quitInterfaceEncryption", Boolean.class);
-            RsaUtil.setQuitInterfaceEncryption(quitInterfaceEncryption);
-        }).end();
     }
 
-    @Override
-    public void addTemplatedRoutesToCamelContext(CamelContext context) throws Exception {
-
-    }
-
-    @Override
-    public Set<String> updateRoutesToCamelContext(CamelContext context) throws Exception {
-        return null;
-    }
 }

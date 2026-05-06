@@ -1,6 +1,6 @@
 package org.apache.camel.sapagent4rest;
 
-public class FuseConstants {
+public class CustomConstants {
 
 	public static final String DESTINATION ="DESTINATION";
 	public static final String RFC = "RFC";

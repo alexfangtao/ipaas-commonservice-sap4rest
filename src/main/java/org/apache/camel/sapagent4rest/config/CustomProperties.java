@@ -8,7 +8,7 @@ import org.springframework.context.annotation.Configuration;
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "camel.custom")
-public class ESBProperties {
+public class CustomProperties {
     private String restful;
     private String delCache;
 }

@@ -2,7 +2,7 @@ package org.apache.camel.sapagent4rest.util;
 
 import com.sap.conn.idoc.jco.JCoIDocServer;
 import com.sap.conn.jco.*;
-import org.apache.camel.sapagent4rest.FuseConstants;
+import org.apache.camel.sapagent4rest.CustomConstants;
 import org.apache.camel.sapagent4rest.entity.PreviewSapField;
 import org.apache.camel.sapagent4rest.entity.SAPDataTypes;
 import org.fusesource.camel.component.sap.ServerManager;
@@ -15,6 +15,9 @@ public class SapUtils {
 
     public static List<PreviewSapField> getResponseParameter(String serverName, String functionName, Boolean isServer) throws Exception {
         JCoFunction function = getjCoFunction(serverName, functionName, isServer);
+        if (function == null) {
+            throw new RuntimeException("RFC does not exist!");
+        }
         JCoParameterList importParaList = function.getExportParameterList();
         JCoParameterList tableParaList = function.getTableParameterList();
 
@@ -61,18 +64,18 @@ public class SapUtils {
                 sapField.setOrder(index);
                 sapField.setDecimal(rec.getDecimals());
                 if ("TABLE".equals(fType)) {
-                    sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_TABLE);
+                    sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_TABLE);
                     fList.add(sapField);
                     sapField.setTable(genTableJavaSource(rec.getRecordMetaData()));
                     continue;
                 } else if ("STRUCTURE".equals(fType)) {
-                    sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_OBJECT);
+                    sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_OBJECT);
                     fList.add(sapField);
                     sapField.setTable(genTableJavaSource(rec.getRecordMetaData()));
                     continue;
                 } else {
                     String javaTypeStr = sapTypeMappings.get(fType);
-                    sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_VALUE);
+                    sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_VALUE);
                     if (javaTypeStr != null) {
                         sapField.setType(javaTypeStr);
                         fList.add(sapField);
@@ -95,13 +98,13 @@ public class SapUtils {
                 sapField.setOrder(index);
                 sapField.setDecimal(recTable.getDecimals());
                 if ("TABLE".equals(fType)) {
-                    sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_TABLE);
+                    sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_TABLE);
                     fList.add(sapField);
                     sapField.setTable(genTableJavaSource(recTable.getRecordMetaData()));
                     continue;
                 }
                 if ("STRUCTURE".equals(fType)) {
-                    sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_OBJECT);
+                    sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_OBJECT);
                     fList.add(sapField);
                     sapField.setTable(genTableJavaSource(recTable.getRecordMetaData()));
                     continue;
@@ -124,15 +127,15 @@ public class SapUtils {
             sapField.setOrder(i);
             sapField.setDecimal(tableRecordMetaData.getDecimals(i));
             if ("TABLE".equals(fType)) {
-                sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_TABLE);
+                sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_TABLE);
                 fList.add(sapField);
                 sapField.setTable(genTableJavaSource(tableRecordMetaData.getRecordMetaData(i)));
             } else if ("STRUCTURE".equals(fType)) {
-                sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_OBJECT);
+                sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_OBJECT);
                 fList.add(sapField);
                 sapField.setTable(genTableJavaSource(tableRecordMetaData.getRecordMetaData(i)));
             } else {
-                sapField.setIsTable(FuseConstants.SAP_DATA_TYPE_VALUE);
+                sapField.setIsTable(CustomConstants.SAP_DATA_TYPE_VALUE);
                 String javaTypeStr = sapTypeMappings.get(fType);
                 if (javaTypeStr != null) {
                     sapField.setType(javaTypeStr);

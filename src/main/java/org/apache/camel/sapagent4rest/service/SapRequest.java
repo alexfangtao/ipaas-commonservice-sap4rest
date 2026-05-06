@@ -5,7 +5,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.sap.conn.jco.JCoDestinationManager;
 import com.sap.conn.jco.JCoException;
 import com.sap.conn.jco.JCoRepository;
-import org.apache.camel.sapagent4rest.FuseConstants;
+import org.apache.camel.sapagent4rest.CustomConstants;
 import org.apache.camel.sapagent4rest.entity.SapField;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.Exchange;
@@ -24,17 +24,15 @@ import org.fusesource.camel.component.sap.model.rfc.impl.StructureImpl;
 import org.fusesource.camel.component.sap.util.RfcUtil;
 
 import java.math.BigDecimal;
-import java.text.DateFormat;
 import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.*;
 
 @Slf4j
 public class SapRequest {
     public void createRequest(Exchange exchange) throws Exception {
 
-        String destination = exchange.getProperty(FuseConstants.DESTINATION, String.class);
-        String rfc = exchange.getProperty(FuseConstants.RFC, String.class);
+        String destination = exchange.getProperty(CustomConstants.DESTINATION, String.class);
+        String rfc = exchange.getProperty(CustomConstants.RFC, String.class);
         //获取请求传递得json报文
         String body = exchange.getIn().getBody(String.class);
         JSONObject inputData = JSONObject.parseObject(body);
@@ -62,67 +60,63 @@ public class SapRequest {
         exchange.getIn().setBody(requestEndpoint);
     }
 
-    public void setStructure(JSONObject inputData, Structure requestEndpoint, List<SapField> sapFieldList) throws Exception {
+    public void setStructure(JSONObject inputData,
+                             Structure requestEndpoint,
+                             List<SapField> sapFieldList) throws Exception {
+        if (inputData == null) {
+            throw new RequestParamException(CustomConstants.ERROR_MSG + "(请求体为空或不是 JSON 对象)");
+        }
         Map<String, Object> inputDataUpper = mapKeyUpper(inputData);
+
         for (SapField sapField : sapFieldList) {
             if (!inputDataUpper.containsKey(sapField.getName())) {
-                throw new RequestParamException(FuseConstants.ERROR_MSG + sapField.getName());
+                throw new RequestParamException(CustomConstants.ERROR_MSG + sapField.getName());
             }
             Object inputValue = inputDataUpper.get(sapField.getName());
 
-            // 请求数据字段为空，不赋值
+            // 顶层为空：保持原行为，跳过
             if (inputValue == null) {
                 continue;
             }
 
-            if (FuseConstants.SAP_DATA_TYPE_VALUE.equals(sapField.getIsTable())) {
-                //普通字段类型
-                if (!(inputValue instanceof String)) {
-                    throw new RequestParamException(FuseConstants.ERROR_MSG + sapField.getName());
-                }
-                //处理特殊类型
-                Object value = parse(sapField, inputValue);
-                requestEndpoint.put(sapField.getName(), value);
-            } else if (FuseConstants.SAP_DATA_TYPE_TABLE.equals(sapField.getIsTable())) {
-                //集合类型
-                if (inputValue instanceof JSONArray) {
-                    Table<Structure> table = (Table<Structure>) requestEndpoint.get(sapField.getName());
-                    List<SapField> fields = sapField.getTable();
-                    JSONArray inputArr = (JSONArray) inputValue;
-                    // 遍历输入数据数组
-                    for (Object item : inputArr) {
-                        Map<String, Object> inputRow = mapKeyUpper((JSONObject) item);
-                        Structure add = table.add();
-                        // 遍历所有字段赋值
-                        for (SapField field : fields) {
-                            Object inputValueItem = inputRow.get(field.getName());
-                            if (!(inputValueItem instanceof String)) {
-                                throw new RequestParamException(FuseConstants.ERROR_MSG + field.getName());
-                            }
+            String isTable = sapField.getIsTable();
 
-                            inputValueItem = parse(field, inputValueItem);
-                            add.put(field.getName(), inputValueItem);
-                        }
-                    }
-                } else {
-                    log.warn("input data is not table:" + inputValue);
+            if (CustomConstants.SAP_DATA_TYPE_VALUE.equals(isTable)) {
+                requestEndpoint.put(sapField.getName(), convertScalar(sapField, inputValue));
+
+            } else if (CustomConstants.SAP_DATA_TYPE_TABLE.equals(isTable)) {
+                // ---- TABLE ----
+                if (!(inputValue instanceof JSONArray)) {
+                    // 修复 L94 上游：明确类型错误而不是隐藏 warn
+                    throw new RequestParamException(
+                            CustomConstants.ERROR_MSG + sapField.getName() + "(应为数组)");
                 }
-            } else if (FuseConstants.SAP_DATA_TYPE_OBJECT.equals(sapField.getIsTable())) {
-                //嵌套类型，重复执行上面得逻辑，只需要支持2层嵌套
-                Map<String, Object> inputObj = mapKeyUpper((JSONObject) inputValue);
-                Structure structure = (Structure) requestEndpoint.get(sapField.getName());
+                Table<Structure> table = (Table<Structure>) requestEndpoint.get(sapField.getName());
                 List<SapField> fields = sapField.getTable();
-                for (SapField field : fields) {
-                    Object inputValueItem = inputObj.get(field.getName());
-                    if (!(inputValueItem instanceof String)) {
-                        throw new Exception(FuseConstants.ERROR_MSG + field.getName());
-                    }
+                JSONArray inputArr = (JSONArray) inputValue;
 
-                    inputValueItem = parse(field, inputValueItem);
-                    structure.put(field.getName(), inputValueItem);
+                for (int i = 0; i < inputArr.size(); i++) {
+                    Object item = inputArr.get(i);
+                    // 修复 L94：每个 item 都做类型检查
+                    JSONObject row = requireJsonObject(
+                            sapField.getName() + "[" + i + "]", item);
+                    Map<String, Object> inputRow = mapKeyUpper(row);
+                    Structure add = table.add();
+                    fillStructure(add, fields, inputRow);
                 }
+
+            } else if (CustomConstants.SAP_DATA_TYPE_OBJECT.equals(isTable)) {
+                // ---- OBJECT ----
+                // 修复 L112：先做 instanceof 检查
+                JSONObject obj = requireJsonObject(sapField.getName(), inputValue);
+                Map<String, Object> inputObj = mapKeyUpper(obj);
+                Structure structure = (Structure) requestEndpoint.get(sapField.getName());
+                // 修复 L117：复用统一处理逻辑，允许 null/缺失子字段，类型错误才抛
+                fillStructure(structure, sapField.getTable(), inputObj);
+
             } else {
-                log.warn("type error:" + inputValue);
+                // 不再仅 warn 即吞掉，明确告警便于排障
+                log.warn("Unsupported isTable type [{}] for field [{}]", isTable, sapField.getName());
             }
         }
     }
@@ -132,10 +126,44 @@ public class SapRequest {
      */
     public Map<String, Object> mapKeyUpper(JSONObject map) {
         HashMap<String, Object> mapKeyUpper = new HashMap<>();
-        for (Map.Entry<String, Object> entry : map.entrySet()) {
-            mapKeyUpper.put(entry.getKey().toUpperCase(Locale.ROOT), entry.getValue());
+        if (map != null) {
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                mapKeyUpper.put(upper(entry.getKey()), entry.getValue());
+            }
         }
+
         return mapKeyUpper;
+    }
+
+    private void fillStructure(Structure target,
+                               List<SapField> fields,
+                               Map<String, Object> inputRow) throws ParseException {
+        for (SapField field : fields) {
+            Object inputValueItem = inputRow.get(field.getName());
+            // 与顶层 value 字段保持一致：null 跳过
+            if (inputValueItem == null) {
+                continue;
+            }
+            target.put(field.getName(), convertScalar(field, inputValueItem));
+        }
+    }
+
+    private Object convertScalar(SapField field, Object inputValue) throws ParseException {
+        if (!(inputValue instanceof String)) {
+            throw new RequestParamException(
+                    CustomConstants.ERROR_MSG + field.getName()
+                            + "(期望字符串，实际为 " + inputValue.getClass().getSimpleName() + ")");
+        }
+        return parse(field, inputValue);
+    }
+
+    private JSONObject requireJsonObject(String fieldName, Object value) {
+        if (!(value instanceof JSONObject)) {
+            String actual = value == null ? "null" : value.getClass().getSimpleName();
+            throw new RequestParamException(
+                    CustomConstants.ERROR_MSG + fieldName + "(期望对象，实际为 " + actual + ")");
+        }
+        return (JSONObject) value;
     }
 
     /**
@@ -185,7 +213,7 @@ public class SapRequest {
     private SapField getSapField(EStructuralFeature eStructuralFeature, Object sapValue) {
         SapField sapField = new SapField();
         String fieldType = eStructuralFeature.getEType().getInstanceTypeName();
-        sapField.setName(eStructuralFeature.getName());
+        sapField.setName(upper(eStructuralFeature.getName()));
         String isTable = getValueType(sapValue);
         if (fieldType == null) {
             fieldType = isTable;
@@ -210,11 +238,11 @@ public class SapRequest {
         // 值类型
         String isTable = "";
         if (sapValue instanceof Table) {
-            isTable = FuseConstants.SAP_DATA_TYPE_TABLE;
+            isTable = CustomConstants.SAP_DATA_TYPE_TABLE;
         } else if (sapValue instanceof Structure) {
-            isTable = FuseConstants.SAP_DATA_TYPE_OBJECT;
+            isTable = CustomConstants.SAP_DATA_TYPE_OBJECT;
         } else {
-            isTable = FuseConstants.SAP_DATA_TYPE_VALUE;
+            isTable = CustomConstants.SAP_DATA_TYPE_VALUE;
         }
         return isTable;
     }
@@ -277,33 +305,11 @@ public class SapRequest {
         }
     }
 
-    public Date parseDate(String dateString, Integer length) throws ParseException {
-        DateFormat dateFormat = null;
+    public Date parseDate(String dateString, Integer length) {
+        return SapDateFormats.parse(dateString, length == null ? 0 : length);
+    }
 
-        switch (length) {
-            case 10:
-                dateFormat = new SimpleDateFormat("yyyy-MM-dd HH");
-                break;
-            case 12:
-                dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm");
-                break;
-            case 14:
-                dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-                break;
-            case 17:
-                dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
-                break;
-            default:
-                dateFormat = new SimpleDateFormat("yyyy-MM-dd");
-                break;
-        }
-        Date date = null;
-        try {
-            date = dateFormat.parse(dateString);
-        } catch (ParseException e) {
-            log.warn("parseDate error:" + dateString);
-            throw new RequestParamException(e.getMessage());
-        }
-        return date;
+    private static String upper(String s) {
+        return s == null ? null : s.toUpperCase(Locale.ROOT);
     }
 }

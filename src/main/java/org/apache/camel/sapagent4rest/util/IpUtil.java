@@ -1,10 +1,9 @@
 package org.apache.camel.sapagent4rest.util;
 
+import lombok.extern.slf4j.Slf4j;
+
 import java.net.*;
-import java.util.ArrayList;
-import java.util.Enumeration;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * 获取本机IP 地址
@@ -12,88 +11,122 @@ import java.util.Optional;
  * @author dingwen
  * 2021.04.28 11:49
  */
+@Slf4j
 public class IpUtil {
-    /*
-     * 获取本机所有网卡信息   得到所有IP信息
-     * @return Inet4Address>
+    /**
+     * 默认放宽的网卡名前缀；可被系统属性 iputil.ifacePrefixes 覆盖（逗号分隔）。
      */
-    public static List<Inet4Address> getLocalIp4AddressFromNetworkInterface() throws SocketException {
-        List<Inet4Address> addresses = new ArrayList<>(1);
-        // 所有网络接口信息
-        Enumeration<NetworkInterface> networkInterfaces = NetworkInterface.getNetworkInterfaces();
-        if (networkInterfaces == null) {
-            return addresses;
+    private static final List<String> IFACE_PREFIXES = parsePrefixes(
+            System.getProperty("iputil.ifacePrefixes",
+                    "eth,ens,eno,enp,em,bond"));
+
+    /**
+     * 是否允许使用 UDP 探测公网 IP 兜底（默认关闭，避免合规风险）。
+     */
+    private static final boolean ALLOW_UDP_PROBE =
+            Boolean.parseBoolean(System.getProperty("iputil.allowUdpProbe", "false"));
+
+    private IpUtil() {
+    }
+
+    private static List<String> parsePrefixes(String csv) {
+        List<String> list = new ArrayList<>();
+        for (String p : csv.split(",")) {
+            String t = p.trim();
+            if (!t.isEmpty()) list.add(t);
         }
-        while (networkInterfaces.hasMoreElements()) {
-            NetworkInterface networkInterface = networkInterfaces.nextElement();
-            //滤回环网卡、点对点网卡、非活动网卡、虚拟网卡并要求网卡名字是eth或ens开头
-            if (!isValidInterface(networkInterface)) {
-                continue;
-            }
-            // 所有网络接口的IP地址信息
-            Enumeration<InetAddress> inetAddresses = networkInterface.getInetAddresses();
-            while (inetAddresses.hasMoreElements()) {
-                InetAddress inetAddress = inetAddresses.nextElement();
-                // 判断是否是IPv4，并且内网地址并过滤回环地址.
-                if (isValidAddress(inetAddress)) {
-                    addresses.add((Inet4Address) inetAddress);
-                }
-            }
-        }
-        return addresses;
+        return Collections.unmodifiableList(list);
     }
 
     /**
-     * 过滤回环网卡、点对点网卡、非活动网卡、虚拟网卡并要求网卡名字是eth或ens开头
-     *
-     * @param ni 网卡
-     * @return 如果满足要求则true，否则false
+     * 业务安全入口：拿不到时返回 fallback，不抛异常、不 NPE。
      */
-    private static boolean isValidInterface(NetworkInterface ni) throws SocketException {
-        return !ni.isLoopback() && !ni.isPointToPoint() && ni.isUp() && !ni.isVirtual()
-                && (ni.getName().startsWith("eth") || ni.getName().startsWith("ens"));
+    public static String getLocalIpOrFallback(String fallback) {
+        try {
+            return getLocalIp4Address().map(Inet4Address::getHostAddress).orElse(fallback);
+        } catch (Exception e) {
+            log.error("getLocalIpOrFallback failed, use fallback={}", fallback, e);
+            return fallback;
+        }
     }
 
-    /**
-     * 判断是否是IPv4，并且内网地址并过滤回环地址.
-     */
-    private static boolean isValidAddress(InetAddress address) {
-        return address instanceof Inet4Address && address.isSiteLocalAddress() && !address.isLoopbackAddress();
-    }
+    public static Optional<Inet4Address> getLocalIp4Address() throws SocketException {
+        List<Inet4Address> all = collectIpv4Addresses();
 
-    /*
-     * 通过Socket 唯一确定一个IP
-     * 当有多个网卡的时候，使用这种方式一般都可以得到想要的IP。甚至不要求外网地址8.8.8.8是可连通的
-     * @return Inet4Address>
-     */
-    private static Optional<Inet4Address> getIpBySocket() throws SocketException {
-        try (final DatagramSocket socket = new DatagramSocket()) {
-            socket.connect(InetAddress.getByName("8.8.8.8"), 10002);
-            if (socket.getLocalAddress() instanceof Inet4Address) {
-                return Optional.of((Inet4Address) socket.getLocalAddress());
-            }
-        } catch (UnknownHostException networkInterfaces) {
-            throw new RuntimeException(networkInterfaces);
+        // 1. 优先按前缀挑
+        Optional<Inet4Address> preferred = pickByPrefix(all);
+        if (preferred.isPresent()) return preferred;
+
+        // 2. 没匹配前缀就挑第一个有效地址（放宽兜底）
+        if (!all.isEmpty()) return Optional.of(all.get(0));
+
+        // 3. 显式允许时再尝试 UDP 探测
+        if (ALLOW_UDP_PROBE) {
+            return getIpBySocket();
         }
         return Optional.empty();
     }
 
-    /*
-     * 获取本地IPv4地址
-     * @return Inet4Address>
-     */
-    public static Optional<Inet4Address> getLocalIp4Address() throws SocketException {
-        final List<Inet4Address> inet4Addresses = getLocalIp4AddressFromNetworkInterface();
-        if (inet4Addresses.size() != 1) {
-            final Optional<Inet4Address> ipBySocketOpt = getIpBySocket();
-            if (ipBySocketOpt.isPresent()) {
-                return ipBySocketOpt;
-            } else {
-                return inet4Addresses.isEmpty() ? Optional.empty() : Optional.of(inet4Addresses.get(0));
+    private static List<Inet4Address> collectIpv4Addresses() throws SocketException {
+        List<Inet4Address> result = new ArrayList<>();
+        Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+        if (nis == null) return result;
+
+        while (nis.hasMoreElements()) {
+            NetworkInterface ni = nis.nextElement();
+            if (!isUsableInterface(ni)) continue;
+            Enumeration<InetAddress> addrs = ni.getInetAddresses();
+            while (addrs.hasMoreElements()) {
+                InetAddress addr = addrs.nextElement();
+                if (isValidAddress(addr)) {
+                    result.add((Inet4Address) addr);
+                }
             }
         }
-        return Optional.of(inet4Addresses.get(0));
+        return result;
     }
 
+    private static Optional<Inet4Address> pickByPrefix(List<Inet4Address> addrs) throws SocketException {
+        for (Inet4Address ip : addrs) {
+            NetworkInterface ni = NetworkInterface.getByInetAddress(ip);
+            if (ni == null) continue;
+            String name = ni.getName();
+            for (String p : IFACE_PREFIXES) {
+                if (name.startsWith(p)) {
+                    return Optional.of(ip);
+                }
+            }
+        }
+        return Optional.empty();
+    }
 
+    /**
+     * 与原实现的差异：去掉强制 eth/ens 前缀，由 pickByPrefix 单独处理。
+     */
+    private static boolean isUsableInterface(NetworkInterface ni) throws SocketException {
+        return !ni.isLoopback() && !ni.isPointToPoint() && ni.isUp() && !ni.isVirtual();
+    }
+
+    private static boolean isValidAddress(InetAddress address) {
+        return address instanceof Inet4Address
+                && address.isSiteLocalAddress()
+                && !address.isLoopbackAddress();
+    }
+
+    /**
+     * UDP 探测仅作为可选兜底，默认关闭。
+     */
+    private static Optional<Inet4Address> getIpBySocket() {
+        try (DatagramSocket socket = new DatagramSocket()) {
+            // 用 RFC 5737 文档地址，避免实际命中 8.8.8.8
+            socket.connect(InetAddress.getByName("192.0.2.1"), 10002);
+            InetAddress local = socket.getLocalAddress();
+            if (local instanceof Inet4Address && !local.isAnyLocalAddress()) {
+                return Optional.of((Inet4Address) local);
+            }
+        } catch (Exception e) {
+            log.debug("UDP probe failed", e);
+        }
+        return Optional.empty();
+    }
 }

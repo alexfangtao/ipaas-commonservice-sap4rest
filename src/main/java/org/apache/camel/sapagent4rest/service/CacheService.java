@@ -1,5 +1,6 @@
 package org.apache.camel.sapagent4rest.service;
 
+import cn.hutool.crypto.asymmetric.RSA;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.github.benmanes.caffeine.cache.CacheLoader;
@@ -7,7 +8,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.sap.conn.jco.JCoException;
 import jakarta.annotation.PostConstruct;
-import org.apache.camel.sapagent4rest.FuseConstants;
+import org.apache.camel.sapagent4rest.CustomConstants;
 import org.apache.camel.sapagent4rest.entity.LicenseCacheEntity;
 import org.apache.camel.sapagent4rest.entity.SapConfig;
 import org.apache.camel.sapagent4rest.exception.RequestParamException;
@@ -17,18 +18,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.CamelContext;
 import org.apache.camel.Exchange;
 import org.apache.camel.sapagent4rest.util.RsaUtil;
-import org.apache.camel.sapagent4rest.util.RsaWrapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import cn.hutool.crypto.asymmetric.KeyType;
 import java.io.IOException;
-import java.net.Inet4Address;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Component
 @Slf4j
@@ -50,6 +48,9 @@ public class CacheService {
 
     @Value("${camel.custom.sap.destination}")
     private String destinationConfig;
+
+    @Autowired
+    private RsaUtil rsaUtil;
 
     private LoadingCache<String, Boolean> rfcRefreshConfigCache;
 
@@ -126,7 +127,7 @@ public class CacheService {
                         try {
                             String saveHttpPath = customHttpBase + "/sapConfigInfo/b";
                             SapConfig sapConfig = getConfigCacheValue(s);
-                            removeCamelCamel(context, sapConfig, saveHttpPath);
+                            removeCamelCache(context, sapConfig, saveHttpPath);
                         } catch (Exception exception) {
                             log.error("rfcRefresh error", exception);
                         }
@@ -180,15 +181,13 @@ public class CacheService {
     }
 
     public void verifyConfig(Exchange exchange) throws Exception {
-        if (context == null) context = exchange.getContext();
-
-        String desName = exchange.getIn().getHeader(FuseConstants.DES_NAME, String.class);
-        String rfc = exchange.getIn().getHeader(FuseConstants.RFC_LOWERCASE, String.class);
-        String id = exchange.getIn().getHeader(FuseConstants.ID, String.class);
+        String desName = exchange.getIn().getHeader(CustomConstants.DES_NAME, String.class);
+        String rfc = exchange.getIn().getHeader(CustomConstants.RFC_LOWERCASE, String.class);
+        String id = exchange.getIn().getHeader(CustomConstants.ID, String.class);
 
 
         if (isEmptyHeader(rfc) || isEmptyHeader(desName)) {
-            throw new RequestParamException(FuseConstants.RFC + "和SAP实例" + "不能为空!");
+            throw new RequestParamException(CustomConstants.RFC + "和SAP实例" + "不能为空!");
         }
         String error = String.format("请求%s/%s/%s：", id,desName, rfc);
         // 验证请求实例是否为本服务实例
@@ -197,7 +196,7 @@ public class CacheService {
             throw new RequestParamException(error + desName + "与服务实例" + destination + "不匹配!");
         }
 
-        String key = desName + FuseConstants.STRING_AT + rfc;
+        String key = desName + CustomConstants.STRING_AT + rfc;
         // 1.缓存读取
         SapConfig config = getConfigCacheValue(key);
         if (config == null) {
@@ -212,7 +211,7 @@ public class CacheService {
         if (l == null || l.getLicenseTime() <= System.currentTimeMillis()) {
             throw new RequestParamException("license过期或错误!");
         }
-        exchange.setProperty(FuseConstants.SVC_NO, config.getSvcNo());
+        exchange.setProperty(CustomConstants.SVC_NO, config.getSvcNo());
     }
 
     private SapConfig getSapConfig(String key) throws IOException {
@@ -225,9 +224,9 @@ public class CacheService {
         map.put("destination", desName);
         map.put("rfcName", rfc);
 
-        String res = RsaUtil.decryptStr(HttpUtil.doPost(httpBase, map));
+        String res = rsaUtil.decryptStr(HttpUtil.doPost(httpBase, map));
         List<SapConfig> sapConfigs = JSONArray.parseArray(res, SapConfig.class);
-        if (sapConfigs == null || sapConfigs.size() == 0) {
+        if (sapConfigs == null || sapConfigs.isEmpty()) {
             return null;
         }
 
@@ -239,8 +238,8 @@ public class CacheService {
 
     private LicenseCacheEntity getLicense() throws Exception{
         String url = customHttpBase + "/licenseInfo/c";
-        String str = RsaUtil.decryptStr(HttpUtil.doGet(url, new HashMap<>()));
-        RsaWrapper rsa = new RsaWrapper("MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAIA+twFFr1hOFUAJ3ckSLAeHblllRC0Ju9LYdoHGjtvIeMcucgCQeRkCW3xVLygqGrIrZvT2oMPZm+FZu/4tO+hWsJ3nmVzRDfll4QijrSK44M+Ff0mrdjBudUpfcoZnGiR5P6DSUojqllFfbtsgr9s89WTdIAPTyhelSrj5WQJ5AgMBAAECgYAEayS/BHmgH0CYLj7X+KpPsBjbN6P7sUQpZY/ftMmjROr0YeNHpbKma/Be/khbp+e3j8tCUWUEmnDGeOMDROe1cvIEzElqFhVoSajahOxIrE+xo9Ma3r/v07uqS0J8vo/9aTtDLgQsRWhxTd74zuE4vxu+yy3U9utq+ibC8Sy+KQJBANSOAyyGKXtCBKVaCgaJNXuuD79/9VcPMRHmByuH8T7hufFYKBk/hjB1I120yj+tJ+hxZ7tI3sGzA0YVALqHwecCQQCadSuWxWIaOBLJ6+C1T7wxl6h5C36/kDNTF/1CVvfmm0gnO4yIK3eM7PJWC9hvZ9+CQ2BX9muBJ2rP7xOh8UyfAkB9x+P87w+RDwosx1FzeLKbk+9hxVjrweOp0dOgYPvT2EPum9puxnakKk1ZYGjmsZMSLDnUTFT1jvd6+2bI+xk1AkAJgKvt2rbuZgTB54ErpnwtkOcMi2iA4J5HvnIWYsNdrLADueYreoEganN+V7w5Hmrh2MNUphR3HbW0lUDf9biBAkEA0UUDiZjnj4XfIzcXGyO46/dEY31bKf445WuscqfJnwUjt14GElmk5MSsyjXD5q9jwhzmQXe9Zh8izc5bX34JsQ==", null);
+        String str = rsaUtil.decryptStr(HttpUtil.doGet(url, new HashMap<>()));
+        RSA rsa = new RSA("MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAIA+twFFr1hOFUAJ3ckSLAeHblllRC0Ju9LYdoHGjtvIeMcucgCQeRkCW3xVLygqGrIrZvT2oMPZm+FZu/4tO+hWsJ3nmVzRDfll4QijrSK44M+Ff0mrdjBudUpfcoZnGiR5P6DSUojqllFfbtsgr9s89WTdIAPTyhelSrj5WQJ5AgMBAAECgYAEayS/BHmgH0CYLj7X+KpPsBjbN6P7sUQpZY/ftMmjROr0YeNHpbKma/Be/khbp+e3j8tCUWUEmnDGeOMDROe1cvIEzElqFhVoSajahOxIrE+xo9Ma3r/v07uqS0J8vo/9aTtDLgQsRWhxTd74zuE4vxu+yy3U9utq+ibC8Sy+KQJBANSOAyyGKXtCBKVaCgaJNXuuD79/9VcPMRHmByuH8T7hufFYKBk/hjB1I120yj+tJ+hxZ7tI3sGzA0YVALqHwecCQQCadSuWxWIaOBLJ6+C1T7wxl6h5C36/kDNTF/1CVvfmm0gnO4yIK3eM7PJWC9hvZ9+CQ2BX9muBJ2rP7xOh8UyfAkB9x+P87w+RDwosx1FzeLKbk+9hxVjrweOp0dOgYPvT2EPum9puxnakKk1ZYGjmsZMSLDnUTFT1jvd6+2bI+xk1AkAJgKvt2rbuZgTB54ErpnwtkOcMi2iA4J5HvnIWYsNdrLADueYreoEganN+V7w5Hmrh2MNUphR3HbW0lUDf9biBAkEA0UUDiZjnj4XfIzcXGyO46/dEY31bKf445WuscqfJnwUjt14GElmk5MSsyjXD5q9jwhzmQXe9Zh8izc5bX34JsQ==", null);
         String s = rsa.decryptStr(str, KeyType.PrivateKey);
         JSONObject jsonObject = JSONObject.parseObject(s);
         LicenseCacheEntity licenseCache = new LicenseCacheEntity();
@@ -257,10 +256,17 @@ public class CacheService {
      * 3.检查RefreshMark字段，本机是否有更新。
      * 4.没有则删除一次camel缓存，在sap有字段更新情况，执行清除RefreshMark字段字段，字段刷新
      */
-    private void removeCamelCamel(CamelContext context, SapConfig config, String saveHttpPath) throws JCoException, IOException {
-        Optional<Inet4Address> address = IpUtil.getLocalIp4Address();
-        String ip = address.get().getHostAddress();
-        if (config.getRefreshMark() == null || !config.getRefreshMark().contains(ip)) {
+    private void removeCamelCache(CamelContext context, SapConfig config, String saveHttpPath) throws JCoException, IOException {
+        String ip = IpUtil.getLocalIpOrFallback(null);
+        if (ip == null) {
+            log.error("Cannot resolve local IPv4 for refreshMark, skip cache refresh once. config={}",
+                    config.getRfcName());
+            return;
+        }
+        String refreshMark = config.getRefreshMark();
+        Set<String> marked = refreshMark == null ? Collections.emptySet() : Arrays.stream(refreshMark.split(",")).map(String::trim)
+                .filter(s -> !s.isEmpty()).collect(Collectors.toSet());
+        if (!marked.contains(ip)) {
             SapManage.removeCamelCache(context, config.getDestination(), config.getRfcName());
             HashMap<String, String> markMap = new HashMap<>();
             markMap.put("configId", config.getConfigId());
